@@ -4,10 +4,9 @@ import sqlite3
 import random
 import os
 import asyncio
-import itertools
+import time
 from dotenv import load_dotenv
 from keep_alive import keep_alive
-import time
 
 # 環境変数をロード
 load_dotenv()
@@ -44,21 +43,26 @@ async def on_ready():
 async def on_message(message):
     if message.author.bot:
         return
+
     user_id = message.author.id
     c.execute('SELECT * FROM levels WHERE user_id=?', (user_id,))
     result = c.fetchone()
+
     if result is None:
         c.execute('INSERT INTO levels (user_id, xp, level, coins, last_work_time) VALUES (?, ?, ?, ?, ?)', 
                   (user_id, 0, 1, 0, 0))
         conn.commit()
         result = (user_id, 0, 1, 0, 0)
+
     xp, level, coins = result[1], result[2], result[3]
     xp += random.randint(1, 10)
     required_xp = calculate_xp(level)
+
     if xp >= required_xp:
         xp -= required_xp
         level += 1
         coins += 10
+
     c.execute('UPDATE levels SET xp=?, level=?, coins=? WHERE user_id=?', 
               (xp, level, coins, user_id))
     conn.commit()
@@ -68,18 +72,25 @@ async def on_message(message):
 async def rank(ctx, member: discord.Member = None):
     if member is None:
         member = ctx.author
+
     user_id = member.id
     c.execute('SELECT * FROM levels WHERE user_id=?', (user_id,))
     result = c.fetchone()
+
     if result is None:
         await ctx.send(f'{member.display_name}さんはまだレベルがありません。')
         return
+
     xp, level, coins = result[1], result[2], result[3]
     await ctx.send(f'{member.display_name}さんのランクカード:\nレベル: {level}\n経験値: {xp}\nナオコイン: {coins}')
 
 # 高い低いゲーム
 @bot.command()
 async def highlow(ctx, bet: int):
+    if bet <= 0:
+        await ctx.send("無効な掛け金です。正の整数を入力してください。")
+        return
+
     user_id = ctx.author.id
     c.execute('SELECT coins FROM levels WHERE user_id=?', (user_id,))
     result = c.fetchone()
@@ -92,10 +103,9 @@ async def highlow(ctx, bet: int):
     streak = 0
     lost = False
 
-    while streak < 5:  # 10回から5回に変更
+    while streak < 5:
         next_number = random.randint(1, 100)
 
-        # 勝率を下げるために、次の数をプレイヤーが予測しにくくする
         if random.random() < 0.75:
             if current_number < 50:
                 next_number = random.randint(current_number + 1, 100)
@@ -133,82 +143,6 @@ async def highlow(ctx, bet: int):
 
     conn.commit()
 
-# 限定じゃんけん
-@bot.command()
-async def limitedrps(ctx, bet: int):
-    user_id = ctx.author.id
-    c.execute('SELECT coins FROM levels WHERE user_id=?', (user_id,))
-    result = c.fetchone()
-
-    if result is None or result[0] < bet:
-        await ctx.send("ナオコインが不足しています。")
-        return
-
-    players = [ctx.author]
-    await ctx.send("限定じゃんけんを開始します。参加する人は「参加」と入力してください。")
-
-    def check(m):
-        return m.channel == ctx.channel and m.content == "参加" and m.author not in players
-
-    try:
-        while len(players) < 4:
-            msg = await bot.wait_for('message', check=check, timeout=30.0)
-            players.append(msg.author)
-            await ctx.send(f"{msg.author.mention}さんが参加しました。現在の参加者: {len(players)}人")
-    except asyncio.TimeoutError:
-        if len(players) < 2:
-            await ctx.send("参加者が足りないためゲームを中止します。")
-            return
-
-    await ctx.send(f"参加者が揃いました。{', '.join([p.mention for p in players])}でゲームを開始します。")
-
-    player_data = {p.id: {"stars": 3, "cards": ["✊", "✋", "✌", "✊", "✋", "✌", "✊", "✋", "✌", "*", "*", "*"]} for p in players}
-
-    while len([p for p in player_data.values() if p["stars"] > 0]) > 1:
-        for p1, p2 in itertools.combinations(players, 2):
-            if player_data[p1.id]["stars"] == 0 or player_data[p2.id]["stars"] == 0:
-                continue
-
-            await ctx.send(f"{p1.mention}さんと{p2.mention}さんの対戦です。")
-
-            async def get_move(player):
-                await player.send(f"現在の手札: {', '.join(player_data[player.id]['cards'])}\n使用するカードを選んでください（✊/✋/✌/*）")
-                while True:
-                    msg = await bot.wait_for('message', check=lambda m: m.author == player and m.channel.type == discord.ChannelType.private)
-                    if msg.content in player_data[player.id]["cards"]:
-                        player_data[player.id]["cards"].remove(msg.content)
-                        return msg.content
-                    await player.send("無効な選択です。もう一度選んでください。")
-
-            move1 = await get_move(p1)
-            move2 = await get_move(p2)
-
-            result = rps_result(move1, move2)
-            if result == 1:
-                player_data[p1.id]["stars"] += 1
-                player_data[p2.id]["stars"] -= 1
-                await ctx.send(f"{p1.mention}さんの勝ち！星を1つ獲得しました。")
-            elif result == -1:
-                player_data[p2.id]["stars"] += 1
-                player_data[p1.id]["stars"] -= 1
-                await ctx.send(f"{p2.mention}さんの勝ち！星を1つ獲得しました。")
-            else:
-                await ctx.send("引き分けです。")
-
-    winner = max(player_data, key=lambda x: player_data[x]["stars"])
-    winnings = bet * 2
-    c.execute('UPDATE levels SET coins = coins + ? WHERE user_id = ?', (winnings - bet, winner))
-    conn.commit()
-    await ctx.send(f"ゲーム終了！{bot.get_user(winner).mention}さんの勝利です！ナオコインが{winnings}増えました！")
-
-def rps_result(move1, move2):
-    if move1 == move2:
-        return 0
-    elif (move1 == "✊" and move2 == "✌") or (move1 == "✋" and move2 == "✊") or (move1 == "✌" and move2 == "✋"):
-        return 1
-    else:
-        return -1
-
 # 新しい!workコマンド
 @bot.command()
 async def work(ctx):
@@ -231,6 +165,10 @@ async def work(ctx):
 # ナオコインを他のユーザーに渡すコマンド
 @bot.command()
 async def give(ctx, member: discord.Member, amount: int):
+    if amount <= 0:
+        await ctx.send("無効な送金額です。正の整数を入力してください。")
+        return
+
     giver_id = ctx.author.id
     receiver_id = member.id
 
@@ -245,7 +183,7 @@ async def give(ctx, member: discord.Member, amount: int):
     c.execute('UPDATE levels SET coins = coins + ? WHERE user_id = ?', (amount, receiver_id))
     conn.commit()
 
-    await ctx.send(f"{ctx.author.mention}さんが{member.mention}さんに{amount}ナオコインを渡しました。")
+    await ctx.send(f"{ctx.author.mention}さんが{member.mention}さんに{amount}ナオコインを送金しました。")
 
 # keep_alive関数を呼び出し
 keep_alive()
@@ -263,4 +201,7 @@ except discord.errors.LoginFailure:
     print("エラー: 不正なトークンです。Discord開発者ポータルで正しいトークンを確認してください。")
 except Exception as e:
     print(f"エラーが発生しました: {e}")
-    os.system("kill 1")
+
+
+
+
